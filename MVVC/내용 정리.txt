@@ -1,0 +1,86 @@
+1. 자바에서 지원하는 synchronized로 처리
+- 결과 : 0이 될 줄 알았으나 50이 남음 ==> @Transactional의 동작 방식 때문
+
+@Transactional이 붙으면 클래스로 래핑한 클래스를 새로 만들어서 실행하게 된다.(TransactionStockService.class 참고)
+@Transactional을 주석처리하면 정상
+
+synchronized의 문제점 : 하나의 프로세스 안에서만 보장, 즉 서버가 1개일 때는 괜찮지만 2개 이상이 되면 문제가 발생
+레이스 컨디션 발생(두 개 이상의 프로세스 혹은 스레드가 공유 자원을 서로 사용하려고 경합(Race)하는 현상)
+
+@Transactional
+public synchronized void decrease(Long id, Long quantity) {
+	Stock stock = stockRepository.findById(id).orElseThrow();
+	stock.decrease(quantity);
+	
+	stockRepository.saveAndFlush(stock);
+}
+
+
+2. DB에서 처리
+	- Dirty Read는 다른 트랜잭션에 의해 수정됐지만 아직 커밋되지 않은 데이터를 읽는 것
+	- Non-Repeatable Read는 한 트랜잭션 내에서 같은 Key를 가진 Row를 두 번 읽었는데 그 사이에 값이 변경되거나 삭제되어 결과가 다르게 나타나는 현상
+	- Phantom Read는 한 트랜잭션 내에서 같은 쿼리를 두 번 수행했는데, 첫 번째 쿼리에서 없던 유령(Phantom) 레코드가 두 번째 쿼리에서 나타나는 현상
+	
+	1) Pessimistic Lock(비관적 락)
+		- 사용자들이 동시에 데이터를 접근할 것이라고 생각
+		
+		- 데이터베이스에 Lock을 걸어서 정합성을 보장
+			- 이렇게 되면 배타적 Lock을 걸기 때문에 처음 하나의 row를 점유한 트랜잭션이 락을 해제하기 전까지 데이터를 가져갈수 없다
+			- Dead Lock 발생
+	
+		DB 격리성 단계
+		- 1단계 : Read Uncommitted : 트랜잭션에서 처리 중인, 아직 커밋되지 않은 데이터를 다른 트랜잭션이 읽는 것을 허용
+			-Dirty Read, Non-Repeatable Read, Phantom Read
+		- 2단계 : Read Committed : 트랜잭션이 커밋되어 확정된 데이터만 다른 트랜잭션이 읽도록 허용한다.
+		- Repeatable Read
+		- Serializable Read
+		
+		※ StockRepository.java에 findByIdWithPessimisticLock 메소드 추가
+		※ PessimisticLockStockService.java 추가
+		※ StockServiceTest.java 테스트
+	
+	2) Optimistic Lock(낙관적 락)
+		- 사용자들이 동시에 데이터를 접근하지 않을 것이라고 생각
+		- 버전을 비교
+			- update stock set product_id=?,quantity=?,version=? where id=? and version=?
+			
+		※ Stock.java에 Version 필드 추가
+		※ StockRepository.java에 findByIdWithOptimisticLock 메소드 추가
+		※ OptimisticLockStockService.java 추가
+		※ OptimisticLockStockFacade.java 추가(버전이 다를 수 있어 업데이트 실패했을 때 로직)
+		※ OptimisticLockStockFacadeTest.java 테스트
+		
+	3) Named Lock
+		-  
+		
+		
+		※ LockRepository.java 추가
+		※ NamedLockStockFacade.java 추가(락을 직접 관리해야 함)
+		※ StockService.java에 @Transactional(propagation = Propagation.REQUIRES_NEW)
+		※ NamedLockStockFacadeTest.java 테스트
+		
+		
+3. Redis 라이브러리 활용
+	1) Lettuce
+		- implementation 'org.springframework.boot:spring-boot-starter-data-redis' 기본 라이브러리
+		- setNx(set if not exist) 명령어를 통해 분산락 구현
+			- SpinLock 방식이므로 retry 로직 작성 필요(락을 획득할 때까지 재시도를 하는 로직)
+			※ SpinLock : 락을 획득하려는 스레드가 락을 사용할 수 있는지 반복적으로 확인하면서 락 획득을 시도
+		- 많은 스레드가 요청하면 Redis에 부하
+		
+		※ RedisLockRepository.java 추가
+		※ LettuceLockStockFacade.java 추가
+		※ LettuceLockStockFacadeTest.java 테스트
+		
+	2) Redisson
+		- implementation 'org.redisson:redisson-spring-boot-starter:3.23.2' 별도 라이브러리 필요
+		- Pub-Sub 기반
+			※ Pub-Sub : 채널을 하나 생성 후 락을 점유 중인 스레드가 락을 획득하려고 대기중인 스레드에게 해제를 알리고 안내를 받은 스레드가 락 획득을 시도
+				- 테스트	
+					- redis-cli1 : subscribe ch1
+					- redis-cli2 : publish ch1 hello
+		- 대부분의 경우에는 별도의 retry 로직 필요 X
+		- Redisson의 경우 락 관련된 클래스들을 라이브러리에서 제공하므로 별도의 Repository 필요 X
+		- Lettuce는 계속 락 획득을 시도하는 반면 Redisson은 락 해제가 되었을 때 한번 혹은 몇 번만 시도하기 때문에 부하 감소
+	
+	※ 재시도가 필요하지 않은 락은 Lettuce로 구현 반대로 재시도가 필요한 상황에는 Redisson
