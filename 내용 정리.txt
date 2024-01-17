@@ -51,8 +51,16 @@ public synchronized void decrease(Long id, Long quantity) {
 		※ OptimisticLockStockFacadeTest.java 테스트
 		
 	3) Named Lock
-		-  
+		- lockRepository.getLock(id.toString()); 
+		- lockRepository.releaseLock(id.toString());
+			※ releaseLock을 finally 블록 내부에 있는 이유 : 락은 존재하지만 해당 스레드에서 얻은 락이 아닐경우 0을 반환, 락이 존재하지 않는다면 null을 반환
+			※ 그렇기 때문에 락을 얻지 못했어도 releaseLock을 해도 문제가 생기지 않는다.
 		
+		- StockService.java -> decrease 메소드가 @Transactional(propagation = Propagation.REQUIRES_NEW) 으로 되야 하는 이유
+			부모의 트랜잭션(NamedLockStockFacade.java)과 동일한 범위로 묶인다면 Synchronized 와 같은 문제가 발생합니다.
+			Database 에 commit 되기 전에 락이 풀리는 현상이 발생합니다.
+			그렇기때문에 별도의 트랜잭션으로 분리를 해주어 Database 에 정상적으로 commit 이 된 이후에 락을 해제하는것을 의도하였습니다.
+			핵심은 lock 을 해제하기전에 Database 에 commit 이 되도록 하는것입니다.
 		
 		※ LockRepository.java 추가
 		※ NamedLockStockFacade.java 추가(락을 직접 관리해야 함)
